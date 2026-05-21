@@ -36,11 +36,11 @@ int ei_buffer_index = 0;
 // Different thresholds for different commands
 struct ConfidenceThresholds {
     float aura_wake = 0.70f;
-    float walk = 0.60f;
-    float cross = 0.60f;
-    float help = 0.60f;
-    float cancel = 0.60f;
-    float background_reject = 0.70f;
+    float walk = 0.50f;
+    float cross = 0.50f;
+    float help = 0.50f;
+    float cancel = 0.50f;
+    float background_reject = 0.65f;
 };
 
 ConfidenceThresholds thresholds;
@@ -58,7 +58,7 @@ unsigned long wakeTime = 0;
 bool isAwake = false;
 
 // ============ INFERENCE DEBOUNCING ============
-#define INFERENCE_COOLDOWN_MS 800      // Minimum time between inferences
+#define INFERENCE_COOLDOWN_MS 300      // Minimum time between inferences
 #define WAKE_TIMEOUT_MS 10000          // How long to stay awake after last command
 #define BOOT_SAFE_PERIOD_MS 3000       // Ignore detections during boot
 #define COMMAND_VALIDATION_WINDOW 2000 // Time window to check for consistent detections
@@ -107,6 +107,23 @@ bool validateCommandConsistency(String command, float confidence) {
 }
 
 // =======================================================
+// IIR LOW PASS FILTER
+// =======================================================
+
+float alpha = 0.5;
+float previous_output = 0;
+
+int16_t applyIIRFilter(int16_t input)
+{
+    float output = alpha * input +
+                   (1.0 - alpha) * previous_output;
+
+    previous_output = output;
+
+    return (int16_t)output;
+}
+
+// =======================================================
 // TASK 1: THU ÂM CHẠY TRÊN CORE 0 (THE EARS)
 // =======================================================
 void AudioCaptureTask(void *parameter) {
@@ -149,7 +166,14 @@ void AudioCaptureTask(void *parameter) {
             
             // Extract 16-bit samples and reduce noise
             for (int i = 0; i < num_samples; i++) {
-                processed_samples[i] = raw_samples[i] >> 13; // Remove noise bits
+                int16_t raw16 = raw_samples[i] >> 13; // Remove noise bits
+
+                int16_t filtered = applyIIRFilter(raw16);
+
+                processed_samples[i] = filtered;
+
+                // Save ONLY sample pairs for Python plotting
+                //Serial.printf("%d,%d\n", raw16, filtered);
             }
 
             // Debug mic level
@@ -179,8 +203,6 @@ void InferenceTask(void *parameter) {
     Serial.println("[Core 1] AI Inference Task Started!");
     
     int16_t received_audio[I2S_BUFFER_LEN];
-    int silenceCounter = 0;
-    const int SILENCE_THRESHOLD = 500;  // Amplitude threshold for silence detection
  
     while(1) {
         // Receive audio from Core 0
@@ -219,7 +241,7 @@ void InferenceTask(void *parameter) {
  
                     EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
                     if (r != EI_IMPULSE_OK) {
-                        Serial.printf("Inference error: %d\n", r);
+                        // Serial.printf("Inference error: %d\n", r);
                         continue;
                     }
  
@@ -250,8 +272,8 @@ void InferenceTask(void *parameter) {
                     Serial.println(best_score, 3);
 
                     for (uint16_t ix = 0;
-                         ix < EI_CLASSIFIER_LABEL_COUNT;
-                         ix++) {
+                        ix < EI_CLASSIFIER_LABEL_COUNT;
+                        ix++) {
 
                         Serial.print(
                             result.classification[ix].label);
@@ -283,8 +305,7 @@ void InferenceTask(void *parameter) {
                     if (!isAwake) {
 
                         if (predicted_word == "AURA" &&
-                            best_score >
-                            thresholds.aura_wake) {
+                            best_score > thresholds.aura_wake) {
 
                             isAwake = true;
 
@@ -324,8 +345,7 @@ void InferenceTask(void *parameter) {
                     // ======================================
 
                     if (predicted_word == "WALK" &&
-                        best_score >
-                        thresholds.walk) {
+                        best_score > thresholds.walk) {
 
                         currentState = WALK;
 
@@ -333,8 +353,7 @@ void InferenceTask(void *parameter) {
                     }
 
                     else if (predicted_word == "CROSS" &&
-                             best_score >
-                             thresholds.cross) {
+                             best_score > thresholds.cross) {
 
                         currentState = CROSS;
 
@@ -342,8 +361,7 @@ void InferenceTask(void *parameter) {
                     }
 
                     else if (predicted_word == "HELP" &&
-                             best_score >
-                             thresholds.help) {
+                             best_score > thresholds.help) {
 
                         currentState = HELP;
 
@@ -351,8 +369,7 @@ void InferenceTask(void *parameter) {
                     }
 
                     else if (predicted_word == "CANCEL" &&
-                             best_score >
-                             thresholds.cancel) {
+                             best_score > thresholds.cancel) {
 
                         currentState = SLEEP;
 
@@ -511,9 +528,6 @@ void setup() {
         NULL,
         1
     );
-    
-    Serial.println("SYSTEM READY");
-    Serial.println("Say: AURA");
  
     // Flash ready indicator
     for(int i = 0; i < 3; i++) {
